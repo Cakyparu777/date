@@ -108,6 +108,7 @@ body {
 	left: 50%;
 	top: 50%;
 	transform: translate(-120%, -50%);
+	z-index: 1;
 }
 
 .btn-yes:hover {
@@ -123,6 +124,7 @@ body {
 	left: 50%;
 	top: 50%;
 	transform: translate(20%, -50%);
+	z-index: 2; /* ensure No is above Yes so it captures pointer first */
 }
 
 .btn-no:hover {

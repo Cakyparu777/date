@@ -32,7 +32,7 @@ function HeartsBackground() {
 	);
 }
 
-function LandingPage({ onYes }) {
+function LandingPage({ onYes, onDodge }) {
 	const arenaRef = useRef(null);
 	return (
 		<div className="page">
@@ -42,14 +42,14 @@ function LandingPage({ onYes }) {
 				<button className="btn btn-yes" onClick={onYes} aria-label="Yes">
 					Yes 💖
 				</button>
-				<DodgingNoButton arenaRef={arenaRef} />
+				<DodgingNoButton arenaRef={arenaRef} onDodge={onDodge} />
 			</div>
 			<footer className="note"></footer>
 		</div>
 	);
 }
 
-function DodgingNoButton({ arenaRef }) {
+function DodgingNoButton({ arenaRef, onDodge }) {
 	const btnRef = useRef(null);
 	const [pos, setPos] = useState({ xPct: 20, yPct: 50 });
 
@@ -66,6 +66,7 @@ function DodgingNoButton({ arenaRef }) {
 		const xPct = (x / arenaRect.width) * 100;
 		const yPct = (y / arenaRect.height) * 100;
 		setPos({ xPct, yPct });
+		if (typeof onDodge === 'function') onDodge();
 	}
 
 	// Nudge on pointer proximity as well
@@ -94,10 +95,20 @@ function DodgingNoButton({ arenaRef }) {
 			onMouseEnter={moveRandomly}
 			onPointerDown={e => {
 				e.preventDefault();
+				e.stopPropagation();
 				moveRandomly();
+			}}
+			onMouseDown={e => {
+				e.preventDefault();
+				e.stopPropagation();
+			}}
+			onMouseUp={e => {
+				e.preventDefault();
+				e.stopPropagation();
 			}}
 			onClick={e => {
 				e.preventDefault();
+				e.stopPropagation();
 				moveRandomly();
 			}}
 			aria-label="No"
@@ -231,6 +242,7 @@ function App() {
 	const [dateTypes, setDateTypes] = useState([]);
 	const [schedule, setSchedule] = useState('');
 	const [route, setRoute] = useState(window.location.pathname);
+	const [justDodgedAt, setJustDodgedAt] = useState(0);
 
 	// Load any saved selections (for /results deep link)
 	useEffect(() => {
@@ -295,7 +307,16 @@ function App() {
 		<div className="app">
 			<HeartsBackground />
 			<div className="card" key={step}>
-				{step === 0 && <LandingPage onYes={() => setStep(1)} />}
+				{step === 0 && (
+					<LandingPage
+						onYes={() => {
+							// Guard against accidental Yes right after a dodge
+							if (Date.now() - justDodgedAt < 350) return;
+							setStep(1);
+						}}
+						onDodge={() => setJustDodgedAt(Date.now())}
+					/>
+				)}
 				{step === 1 && (
 					<PreferencesPage
 						selections={dateTypes}
