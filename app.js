@@ -214,14 +214,181 @@ function ConfirmationPage({ types, schedule, onRestart }) {
 	);
 }
 
+// --- E2E Secret share helpers (no backend) ---
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function bufToB64(buffer) {
+	const bytes = new Uint8Array(buffer);
+	let binary = '';
+	for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+	return btoa(binary);
+}
+
+function b64ToBuf(b64) {
+	const binary = atob(b64);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes.buffer;
+}
+
+async function deriveAesKey(passphrase, saltBytes) {
+	const keyMaterial = await crypto.subtle.importKey('raw', textEncoder.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+	return crypto.subtle.deriveKey(
+		{ name: 'PBKDF2', salt: saltBytes, iterations: 100000, hash: 'SHA-256' },
+		keyMaterial,
+		{ name: 'AES-GCM', length: 256 },
+		false,
+		['encrypt', 'decrypt']
+	);
+}
+
+async function encryptSelectionsE2E(payloadObj, passphrase) {
+	const salt = crypto.getRandomValues(new Uint8Array(16));
+	const iv = crypto.getRandomValues(new Uint8Array(12));
+	const key = await deriveAesKey(passphrase, salt);
+	const data = textEncoder.encode(JSON.stringify(payloadObj));
+	const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+	return `v1.${bufToB64(salt)}.${bufToB64(iv)}.${bufToB64(cipher)}`;
+}
+
+async function decryptSelectionsE2E(secret, passphrase) {
+	try {
+		const [ver, saltB64, ivB64, ctB64] = secret.split('.');
+		if (ver !== 'v1') throw new Error('bad version');
+		const salt = new Uint8Array(b64ToBuf(saltB64));
+		const iv = new Uint8Array(b64ToBuf(ivB64));
+		const ct = b64ToBuf(ctB64);
+		const key = await deriveAesKey(passphrase, salt);
+		const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+		const json = textDecoder.decode(plainBuf);
+		return JSON.parse(json);
+	} catch (e) {
+		return null;
+	}
+}
+
+// --- Friendly path helpers for logging ---
+const allowedTypes = new Set(['hiking', 'movie', 'coffee', 'dinner']);
+const scheduleSlugMap = [
+	{ text: 'Friday 7:00 PM', slugs: ['friday-7pm', 'fri-7pm', 'friday7pm'] },
+	{ text: 'Saturday 10:00 AM', slugs: ['saturday-10am', 'sat-10am', 'saturday10am'] },
+	{ text: 'Saturday 6:30 PM', slugs: ['saturday-630pm', 'sat-630pm', 'saturday6:30pm', 'saturday6-30pm', 'sat-6-30pm'] },
+	{ text: 'Sunday 3:00 PM', slugs: ['sunday-3pm', 'sun-3pm', 'sunday3pm'] }
+];
+
+function toScheduleSlug(text) {
+	switch (text) {
+		case 'Friday 7:00 PM': return 'friday-7pm';
+		case 'Saturday 10:00 AM': return 'saturday-10am';
+		case 'Saturday 6:30 PM': return 'saturday-630pm';
+		case 'Sunday 3:00 PM': return 'sunday-3pm';
+		default: return '';
+	}
+}
+
+function fromScheduleSlug(slug) {
+	if (!slug) return '';
+	const norm = slug.toLowerCase().replace(/[^a-z0-9-]/g, '');
+	for (const m of scheduleSlugMap) {
+		if (m.slugs.includes(norm)) return m.text;
+	}
+	return '';
+}
+
+function buildFriendlyResultsPath(types, when) {
+	const typeTokens = (types || []).map(t => String(t).toLowerCase()).filter(t => allowedTypes.has(t));
+	const scheduleSlug = toScheduleSlug(when);
+	if (!scheduleSlug) return '/results';
+	const typesPart = typeTokens.length ? typeTokens.join('-') : 'surprise';
+	return `/results_${typesPart}_${scheduleSlug}`;
+}
+
+function parseFriendlyResultsPath(pathname) {
+	let slug = null;
+	if (pathname.startsWith('/results_')) {
+		slug = pathname.slice('/results_'.length);
+	} else if (pathname.startsWith('/results-')) {
+		slug = pathname.slice('/results-'.length);
+	} else if (pathname.startsWith('/r/')) {
+		slug = pathname.slice('/r/'.length);
+	}
+	if (!slug) return null;
+	const idx = slug.lastIndexOf('_');
+	if (idx === -1) return null;
+	const typesPart = slug.slice(0, idx);
+	const schedPart = slug.slice(idx + 1);
+	const schedule = fromScheduleSlug(schedPart);
+	if (!schedule) return null;
+	const types = typesPart.split(/[-+,\s]+/).map(s => s.trim().toLowerCase()).filter(s => allowedTypes.has(s));
+	return { types, schedule };
+}
+
+function SecretShare({ types, schedule }) {
+	const [pass, setPass] = React.useState('');
+	const [code, setCode] = React.useState('');
+	const [busy, setBusy] = React.useState(false);
+	const hasData = Array.isArray(types) && types.length > 0 && typeof schedule === 'string' && schedule.length > 0;
+
+	async function generate() {
+		if (!hasData) return;
+		if (!pass) return;
+		setBusy(true);
+		try {
+			const secret = await encryptSelectionsE2E({ t: types, s: schedule }, pass);
+			setCode(secret);
+			try {
+				await navigator.clipboard.writeText(secret);
+			} catch {}
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	return (
+		<div style={{ marginTop: 8 }}>
+			<p className="subtitle">Prefer privacy? Create a secret code she can send you. Only your passphrase can decrypt it.</p>
+			<div className="actions" style={{ gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+				<input
+					type="password"
+					placeholder="Passphrase"
+					value={pass}
+					onChange={e => setPass(e.target.value)}
+					className="chip"
+					style={{ padding: '10px 12px', minWidth: 220 }}
+				/>
+				<button className="btn btn-primary" disabled={!pass || !hasData || busy} onClick={generate}>
+					{busy ? 'Generating…' : 'Generate secret code'}
+				</button>
+				<a className="btn btn-secondary" href="/decode">Open decoder</a>
+			</div>
+			{code && (
+				<div className="actions" style={{ marginTop: 10, flexDirection: 'column' }}>
+					<div className="subtitle">Share this code + your passphrase:</div>
+					<div className="chip" style={{ wordBreak: 'break-all', background: '#fff' }}>{code}</div>
+				</div>
+			)}
+		</div>
+	);
+}
+
 function ResultsPage({ savedTypes, savedSchedule, onRestart }) {
-	const hasData = Array.isArray(savedTypes) && savedTypes.length > 0 && typeof savedSchedule === 'string' && savedSchedule.length > 0;
+	// Prefer querystring if present for sharing across devices
+	const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
+	const queryTypes = params.get('t') ? params.get('t').split(',').filter(Boolean) : [];
+	const querySchedule = params.get('s') || '';
+	const effectiveTypes = queryTypes.length ? queryTypes : savedTypes;
+	const effectiveSchedule = querySchedule || savedSchedule;
+	const hasData = Array.isArray(effectiveTypes) && effectiveTypes.length > 0 && typeof effectiveSchedule === 'string' && effectiveSchedule.length > 0;
 	return (
 		<div className="app">
 			<HeartsBackground />
 			<div className="card">
 				{hasData ? (
-					<ConfirmationPage types={savedTypes} schedule={savedSchedule} onRestart={onRestart} />
+					<>
+						<ConfirmationPage types={effectiveTypes} schedule={effectiveSchedule} onRestart={onRestart} />
+						<SecretShare types={effectiveTypes} schedule={effectiveSchedule} />
+					</>
 				) : (
 					<div className="page confirm">
 						<div className="big-emoji">🫶</div>
@@ -232,6 +399,71 @@ function ResultsPage({ savedTypes, savedSchedule, onRestart }) {
 						</div>
 					</div>
 				)}
+			</div>
+		</div>
+	);
+}
+
+function DecodePage() {
+	const [code, setCode] = React.useState('');
+	const [pass, setPass] = React.useState('');
+	const [result, setResult] = React.useState(null);
+	const [error, setError] = React.useState('');
+
+	async function onDecode() {
+		setError('');
+		setResult(null);
+		if (!code || !pass) return;
+		const data = await decryptSelectionsE2E(code.trim(), pass);
+		if (!data || !Array.isArray(data.t) || !data.s) {
+			setError('Could not decrypt. Check code or passphrase.');
+			return;
+		}
+		setResult({ types: data.t, schedule: data.s });
+	}
+
+	return (
+		<div className="app">
+			<HeartsBackground />
+			<div className="card">
+				<div className="page">
+					<h1 className="title">Decode Choices</h1>
+					<p className="subtitle">Paste the secret code and enter the passphrase.</p>
+					<div className="actions" style={{ gap: 8, flexDirection: 'column', alignItems: 'stretch' }}>
+						<textarea
+							placeholder="Secret code"
+							value={code}
+							onChange={e => setCode(e.target.value)}
+							className="chip"
+							style={{ minHeight: 80 }}
+						/>
+						<input
+							type="password"
+							placeholder="Passphrase"
+							value={pass}
+							onChange={e => setPass(e.target.value)}
+							className="chip"
+						/>
+						<div className="actions" style={{ justifyContent: 'center' }}>
+							<button className="btn btn-primary" onClick={onDecode} disabled={!code || !pass}>Decode</button>
+							<a className="btn btn-secondary" href="/">Home</a>
+						</div>
+						{error && <div className="subtitle" style={{ color: '#f43f5e' }}>{error}</div>}
+					</div>
+					{result && (
+						<div style={{ marginTop: 12 }}>
+							<ConfirmationPage
+								types={result.types}
+								schedule={result.schedule}
+								onRestart={() => {
+									setResult(null);
+									setCode('');
+									setPass('');
+								}}
+							/>
+						</div>
+					)}
+				</div>
 			</div>
 		</div>
 	);
@@ -287,7 +519,30 @@ function App() {
 		setDateTypes(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
 	}
 
+	function buildResultsPath(types, when) {
+		const sp = new URLSearchParams();
+		if (types?.length) sp.set('t', types.join(','));
+		if (when) sp.set('s', when);
+		const qs = sp.toString();
+		return '/results' + (qs ? `?${qs}` : '');
+	}
+
 	// If user lands on /results directly, render results page
+	const friendly = parseFriendlyResultsPath(route);
+	if (friendly) {
+		return (
+			<ResultsPage
+				savedTypes={friendly.types}
+				savedSchedule={friendly.schedule}
+				onRestart={() => {
+					setDateTypes([]);
+					setSchedule('');
+					navigate('/');
+					setStep(0);
+				}}
+			/>
+		);
+	}
 	if (route === '/results') {
 		return (
 			<ResultsPage
@@ -301,6 +556,9 @@ function App() {
 				}}
 			/>
 		);
+	}
+	if (route === '/decode') {
+		return <DecodePage />;
 	}
 
 	return (
@@ -331,7 +589,7 @@ function App() {
 						onSelect={setSchedule}
 						onNext={() => {
 							setStep(3);
-							navigate('/results');
+							navigate(buildFriendlyResultsPath(dateTypes, schedule));
 						}}
 						onBack={() => setStep(1)}
 					/>
