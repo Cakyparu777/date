@@ -203,13 +203,92 @@ function ConfirmationPage({ types, schedule, onRestart }) {
 	);
 }
 
+function ResultsPage({ savedTypes, savedSchedule, onRestart }) {
+	const hasData = Array.isArray(savedTypes) && savedTypes.length > 0 && typeof savedSchedule === 'string' && savedSchedule.length > 0;
+	return (
+		<div className="app">
+			<HeartsBackground />
+			<div className="card">
+				{hasData ? (
+					<ConfirmationPage types={savedTypes} schedule={savedSchedule} onRestart={onRestart} />
+				) : (
+					<div className="page confirm">
+						<div className="big-emoji">🫶</div>
+						<h1 className="title">No saved selections yet</h1>
+						<p className="subtitle">Pick your date preferences first, then come back to <strong>/results</strong>.</p>
+						<div className="actions" style={{ marginTop: 10 }}>
+							<a className="btn btn-secondary" href="/">Back home</a>
+						</div>
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
 function App() {
 	const [step, setStep] = useState(0);
 	const [dateTypes, setDateTypes] = useState([]);
 	const [schedule, setSchedule] = useState('');
+	const [route, setRoute] = useState(window.location.pathname);
+
+	// Load any saved selections (for /results deep link)
+	useEffect(() => {
+		try {
+			const raw = localStorage.getItem('dateAppSelections');
+			if (raw) {
+				const parsed = JSON.parse(raw);
+				if (Array.isArray(parsed?.dateTypes)) setDateTypes(parsed.dateTypes);
+				if (typeof parsed?.schedule === 'string') setSchedule(parsed.schedule);
+			}
+		} catch {
+			// ignore
+		}
+	}, []);
+
+	// Persist selections
+	useEffect(() => {
+		try {
+			localStorage.setItem('dateAppSelections', JSON.stringify({ dateTypes, schedule }));
+		} catch {
+			// ignore
+		}
+	}, [dateTypes, schedule]);
+
+	// Simple client-side routing
+	useEffect(() => {
+		function onPop() {
+			setRoute(window.location.pathname);
+		}
+		window.addEventListener('popstate', onPop);
+		return () => window.removeEventListener('popstate', onPop);
+	}, []);
+
+	function navigate(path) {
+		if (path !== window.location.pathname) {
+			window.history.pushState({}, '', path);
+			setRoute(path);
+		}
+	}
 
 	function toggleType(type) {
 		setDateTypes(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
+	}
+
+	// If user lands on /results directly, render results page
+	if (route === '/results') {
+		return (
+			<ResultsPage
+				savedTypes={dateTypes}
+				savedSchedule={schedule}
+				onRestart={() => {
+					setDateTypes([]);
+					setSchedule('');
+					navigate('/');
+					setStep(0);
+				}}
+			/>
+		);
 	}
 
 	return (
@@ -229,7 +308,10 @@ function App() {
 					<SchedulePage
 						selected={schedule}
 						onSelect={setSchedule}
-						onNext={() => setStep(3)}
+						onNext={() => {
+							setStep(3);
+							navigate('/results');
+						}}
 						onBack={() => setStep(1)}
 					/>
 				)}
@@ -241,6 +323,7 @@ function App() {
 							setDateTypes([]);
 							setSchedule('');
 							setStep(0);
+							navigate('/');
 						}}
 					/>
 				)}
